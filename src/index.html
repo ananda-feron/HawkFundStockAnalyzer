@@ -6,8 +6,30 @@
     <title>Hawk Stock Analysis</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
-  <body>
-    <div class="app-shell">
+  <body class="auth-locked">
+    <section id="login-screen" class="login-screen" aria-labelledby="login-title">
+      <form id="login-form" class="login-card">
+        <img src="../images/logo.png" alt="SUNY New Paltz logo" class="login-logo" />
+        <p class="eyebrow">Hawk Fund Stock Analyzer</p>
+        <h1 id="login-title">Sign in</h1>
+        <p class="muted">Choose whether you are a student or faculty member, then enter your password to access the analysis dashboard.</p>
+        <label for="user-role">User type</label>
+        <select id="user-role" name="role" required>
+          <option value="student">Student</option>
+          <option value="faculty">Faculty</option>
+        </select>
+
+        <label for="login-username">Username</label>
+        <input id="login-username" name="username" type="text" autocomplete="username" placeholder="Enter any username" required />
+
+        <label for="login-password">Password</label>
+        <input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="Enter any password" required />
+        <button type="submit">Log in</button>
+        <p id="login-error" class="login-error" role="alert"></p>
+      </form>
+    </section>
+
+    <div class="app-shell" id="app-shell" aria-hidden="true">
       <aside class="sidebar" aria-label="Analysis sections">
         <div class="brand">
           <img src="../images/logo.png" alt="SUNY New Paltz logo" class="mark" style="width: 40px; height: 40px; border-radius: 8px; object-fit: cover;" />
@@ -17,6 +39,12 @@
           </div>
         </div>
         <nav>
+          <div class="theme-row">
+            <span>Dark Mode</span>
+            <button id="theme-toggle" class="theme-switch" type="button" role="switch" aria-checked="false" aria-label="Toggle dark mode">
+              <span class="switch-icon" aria-hidden="true">☀</span>
+            </button>
+          </div>
           <a href="#overview">Overview</a>
           <a href="#quant">Quantitative</a>
           <a href="#fundamental">Fundamental</a>
@@ -24,6 +52,24 @@
           <a href="#report">Report</a>
           <a href="#history">History</a>
         </nav>
+        <div class="session-card">
+          <small>Logged in as</small>
+          <strong id="session-role">--</strong>
+          <button id="logout-button" class="secondary" type="button">Log out</button>
+        </div>
+        <section class="sidebar-news" aria-label="Financial news report">
+          <div class="sidebar-news-head">
+            <small>Financial news report</small>
+            <button id="refresh-news" class="icon-button" type="button" title="Refresh news">↻</button>
+          </div>
+          <div id="news-carousel" class="news-carousel">
+            <article class="news-slide active">
+              <div class="news-image placeholder"></div>
+              <strong>Enter a ticker to load recent market news.</strong>
+              <span>NewsData.io headlines and Unsplash images appear here.</span>
+            </article>
+          </div>
+        </section>
       </aside>
 
       <main>
@@ -42,6 +88,22 @@
           </form>
         </section>
 
+        <section class="api-settings section-band compact-band">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">API settings</p>
+              <h2>Connect real stock data and recent news.</h2>
+            </div>
+            <button id="save-api-keys" type="button" class="secondary">Save API Keys</button>
+          </div>
+          <div class="api-grid">
+            <label>Alpha Vantage API Key<input id="alpha-vantage-key" type="password" placeholder="Required for stock prices and fundamentals" /></label>
+            <label>NewsData.io API Key<input id="newsdata-key" type="password" placeholder="Required for financial news" /></label>
+            <label>Unsplash Access Key<input id="unsplash-key" type="password" placeholder="Optional image fallback" /></label>
+          </div>
+          <p id="api-status" class="muted">Keys are saved locally in this browser profile. Alpha Vantage powers the stock analysis when a key is saved.</p>
+        </section>
+
         <section class="summary-grid" aria-live="polite">
           <article class="summary-panel wide">
             <p class="eyebrow">Current recommendation</p>
@@ -49,6 +111,8 @@
               <div>
                 <h2 id="company-name">Enter a ticker to begin</h2>
                 <p id="company-description">The app will analyze the stock symbol you enter and generate charts, beginner explanations, and a DOCX report.</p>
+                <p id="company-overview" class="company-overview">Company and fund overviews appear here after analysis.</p>
+                <p id="competitors" class="competitors">Top competitors will appear here.</p>
               </div>
               <div class="score-ring">
                 <span id="score">--</span>
@@ -152,10 +216,10 @@
           <div class="section-head">
             <div>
               <p class="eyebrow">4. Report generator</p>
-              <h2>Creates a DOCX report modeled on the attached Hawk Report.</h2>
+              <h2>Creates a Hawk Report.</h2>
             </div>
             <div class="action-row">
-              <button id="download-report" disabled>Save DOCX Report</button>
+              <button id="download-report" disabled>Save Hawk Report</button>
               <button id="print-report" class="secondary" disabled>Print / Save PDF</button>
             </div>
           </div>
@@ -169,7 +233,7 @@
           <div class="section-head">
             <div>
               <p class="eyebrow">5. Report history</p>
-              <h2>Open previous DOCX reports in Microsoft Word, Google Docs workflows, or another editor.</h2>
+              <h2>Open previous Hawk Reports in Microsoft Word, Google Docs, or other editor.</h2>
             </div>
             <button id="refresh-history" class="secondary">Refresh</button>
           </div>

@@ -33,10 +33,22 @@ const TOPICS = {
   }
 };
 
+const ORANGE = "#f97316";
+const ORANGE_DARK = "#ea580c";
+const BLUE = "#0d6efd";
+const PURPLE = "#6f42c1";
+const AUTH_KEY = "hawk_auth_session";
+const ALPHA_VANTAGE_KEY = "hawk_alpha_vantage_key";
+const NEWSDATA_KEY = "hawk_newsdata_key";
+const UNSPLASH_KEY = "hawk_unsplash_key";
+
+let newsTimer = null;
+
 const PROFILES = {
   GOOGL: {
     company: "Alphabet Inc.",
-    description: "A technology holding company built around Google Services, Google Cloud, and Other Bets. Its largest revenue driver is advertising, with growth support from cloud computing, AI tools, subscriptions, platforms, and devices.",
+    description: "Alphabet Inc. is the parent company of Google and a major global technology platform business. It earns most of its revenue from advertising while also expanding through cloud computing, subscriptions, devices, YouTube, and artificial intelligence tools. The company is financially strong, but its results remain sensitive to digital ad spending, regulation, and competition in AI and cloud services.",
+    competitors: ["Microsoft", "Amazon", "Meta Platforms"],
     revenue: [
       ["Google Services", 85.1],
       ["Google Cloud", 14.6],
@@ -74,7 +86,8 @@ const PROFILES = {
   },
   AAPL: {
     company: "Apple Inc.",
-    description: "A global consumer technology company with revenue from iPhone, Mac, iPad, wearables, services, and digital content. Its strengths are brand loyalty, ecosystem depth, margins, and recurring services revenue.",
+    description: "Apple Inc. is a global consumer technology company known for the iPhone, Mac, iPad, Apple Watch, services, and digital content ecosystem. Its competitive strengths include brand loyalty, premium hardware margins, installed-base scale, and recurring services revenue. Key risks include slower device replacement cycles, supply-chain exposure, regulation of app-store economics, and competition in consumer devices and services.",
+    competitors: ["Samsung Electronics", "Microsoft", "Alphabet"],
     revenue: [
       ["Products", 75],
       ["Services", 25],
@@ -112,7 +125,8 @@ const PROFILES = {
   },
   MSFT: {
     company: "Microsoft Corp.",
-    description: "A diversified technology company with major revenue from cloud infrastructure, productivity software, enterprise subscriptions, gaming, LinkedIn, and AI-enabled platforms.",
+    description: "Microsoft Corp. is a diversified technology company with major revenue from cloud infrastructure, productivity software, enterprise subscriptions, gaming, LinkedIn, and AI-enabled platforms. Its business model benefits from recurring commercial subscriptions, deep enterprise relationships, and strong positioning in cloud and AI. Important risks include cloud competition, cybersecurity execution, regulatory scrutiny, and the need to keep converting AI demand into profitable growth.",
+    competitors: ["Amazon", "Alphabet", "Oracle"],
     revenue: [
       ["Productivity", 40],
       ["Cloud", 43],
@@ -151,6 +165,7 @@ const PROFILES = {
 };
 
 let state = null;
+let companyDirectoryPromise = null;
 
 const el = (id) => document.getElementById(id);
 const pct = (n, d = 1) => `${Number(n).toFixed(d)}%`;
@@ -196,7 +211,8 @@ function profileFor(ticker) {
   const pe = 12 + rand() * 30;
   return {
     company: `${ticker} Corporation`,
-    description: "A generated beginner-analysis profile. Connect a licensed data provider for exact company segments, filings, and bond information.",
+    description: `${ticker} is analyzed with an educational generated profile because exact company reference data is not connected yet. The dashboard estimates business mix, risk, profitability, valuation, and technical signals from available price data and seeded fundamentals. For a final investment decision, users should verify the company name, filings, competitors, and ratios with a licensed market-data provider.`,
+    competitors: ["Primary peer 1", "Primary peer 2", "Primary peer 3"],
     revenue: [
       ["Core operations", 72],
       ["Growth segment", 22],
@@ -236,42 +252,143 @@ function profileFor(ticker) {
 
 async function loadTickerData(ticker) {
   const profile = profileFor(ticker);
+  await enrichProfileFromDirectory(profile, ticker);
   const generated = createSeries(profile, ticker);
-  const source = "Educational generated analysis for the entered ticker";
+  const alphaKey = localStorage.getItem(ALPHA_VANTAGE_KEY);
 
-  try {
-    const [stock, market] = await Promise.all([fetchStooq(ticker), fetchStooq("SPY")]);
-    if (stock.length > 48 && market.length > 48) {
-      profile.basePrice = stock[0];
-      profile.targetPrice = stock.at(-1);
-      return { profile, prices: { stock, market }, source: "Public monthly price history for the entered ticker; fundamentals are educational placeholders until a fundamentals API is connected" };
-    }
-  } catch (error) {
-    console.info("Public price fetch unavailable; using seeded data.", error);
+  if (!alphaKey) {
+    return {
+      profile,
+      prices: generated,
+      source: "Add an Alpha Vantage API key to use real stock data. Showing generated educational data for now."
+    };
   }
 
-  return { profile, prices: generated, source };
+  try {
+    const [stockMonthly, marketMonthly, quote, overview] = await Promise.all([
+      fetchAlphaMonthlySeries(ticker, alphaKey),
+      fetchAlphaMonthlySeries("SPY", alphaKey),
+      fetchAlphaGlobalQuote(ticker, alphaKey),
+      fetchAlphaOverview(ticker, alphaKey)
+    ]);
+    applyAlphaOverview(profile, overview, ticker);
+    const stock = mergeLatestQuote(stockMonthly, quote);
+    const market = marketMonthly.slice(-stock.length);
+    if (stock.length > 24 && market.length > 24) {
+      return {
+        profile,
+        prices: { stock, market },
+        source: `Alpha Vantage monthly time series and latest quote for ${ticker}. Latest quote: ${quote ? money(quote) : "not available"}.`
+      };
+    }
+  } catch (error) {
+    console.info("Alpha Vantage data unavailable; using generated data.", error);
+    return {
+      profile,
+      prices: generated,
+      source: `Alpha Vantage data could not be loaded (${error.message}). Showing generated educational data.`
+    };
+  }
+
+  return { profile, prices: generated, source: "Alpha Vantage returned too little price history. Showing generated educational data." };
 }
 
-async function fetchStooq(ticker) {
-  const symbol = `${ticker.toLowerCase()}.us`;
-  const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(symbol)}&i=m`;
+async function enrichProfileFromDirectory(profile, ticker) {
+  if (PROFILES[ticker]) return;
+  const match = await findCompanyDirectoryEntry(ticker);
+  if (!match) return;
+  profile.company = match.name;
+  profile.description = `${match.name} (${ticker}) is analyzed with an educational generated profile because detailed fundamentals are not connected yet. The dashboard estimates business mix, risk, profitability, valuation, and technical signals from available price data and seeded fundamentals. For a final investment decision, users should verify filings, competitors, and ratios with a licensed market-data provider.`;
+}
+
+async function findCompanyDirectoryEntry(ticker) {
+  try {
+    if (!companyDirectoryPromise) {
+      companyDirectoryPromise = fetch("https://www.sec.gov/files/company_tickers_exchange.json")
+        .then((response) => (response.ok ? response.json() : null))
+        .catch(() => null);
+    }
+    const directory = await companyDirectoryPromise;
+    const row = directory?.data?.find((item) => String(item[2]).toUpperCase() === ticker);
+    return row ? { name: row[1], ticker: row[2], exchange: row[3] } : null;
+  } catch (error) {
+    console.info("Company name lookup unavailable; using generated company label.", error);
+    return null;
+  }
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs = 8000) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 2500);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   try {
     response = await fetch(url, { signal: controller.signal });
   } finally {
     clearTimeout(timeout);
   }
-  if (!response.ok) throw new Error("Price request failed");
-  const text = await response.text();
-  return text
-    .trim()
-    .split("\n")
+  if (!response.ok) throw new Error(`Request failed with status ${response.status}`);
+  const data = await response.json();
+  if (data.Note || data.Information) throw new Error(data.Note || data.Information);
+  if (data["Error Message"]) throw new Error(data["Error Message"]);
+  return data;
+}
+
+async function fetchAlphaMonthlySeries(ticker, apiKey) {
+  const url = `https://www.alphavantage.co/query?function=TIME_SERIES_MONTHLY&symbol=${encodeURIComponent(ticker)}&apikey=${encodeURIComponent(apiKey)}`;
+  const data = await fetchJsonWithTimeout(url);
+  const series = data["Monthly Time Series"];
+  if (!series) throw new Error("Monthly time series was not returned.");
+  return Object.entries(series)
+    .sort(([a], [b]) => a.localeCompare(b))
     .slice(-61)
-    .map((line) => Number(line.split(",")[4]))
+    .map(([, values]) => Number(values["4. close"]))
     .filter((value) => Number.isFinite(value));
+}
+
+async function fetchAlphaGlobalQuote(ticker, apiKey) {
+  const url = `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${encodeURIComponent(ticker)}&apikey=${encodeURIComponent(apiKey)}`;
+  const data = await fetchJsonWithTimeout(url);
+  const price = Number(data["Global Quote"]?.["05. price"]);
+  return Number.isFinite(price) ? price : null;
+}
+
+async function fetchAlphaOverview(ticker, apiKey) {
+  const url = `https://www.alphavantage.co/query?function=OVERVIEW&symbol=${encodeURIComponent(ticker)}&apikey=${encodeURIComponent(apiKey)}`;
+  return fetchJsonWithTimeout(url);
+}
+
+function mergeLatestQuote(monthly, quote) {
+  const prices = monthly.slice(-61);
+  if (quote && Number.isFinite(quote) && prices.length) prices[prices.length - 1] = quote;
+  return prices;
+}
+
+function alphaNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function alphaPercent(value) {
+  const number = alphaNumber(value);
+  return number === null ? null : number * 100;
+}
+
+function applyAlphaOverview(profile, overview, ticker) {
+  if (!overview || Object.keys(overview).length === 0) return;
+  profile.company = overview.Name || profile.company || `${ticker} Corporation`;
+  if (overview.Description) profile.description = overview.Description;
+  const peerHints = [overview.Sector, overview.Industry].filter(Boolean);
+  if (peerHints.length) profile.competitors = peerHints;
+  const ratios = profile.ratios;
+  ratios.netMargin = alphaPercent(overview.ProfitMargin) ?? ratios.netMargin;
+  ratios.roa = alphaPercent(overview.ReturnOnAssetsTTM) ?? ratios.roa;
+  ratios.roe = alphaPercent(overview.ReturnOnEquityTTM) ?? ratios.roe;
+  ratios.epsGrowth = alphaPercent(overview.QuarterlyEarningsGrowthYOY) ?? ratios.epsGrowth;
+  ratios.revenueGrowth = alphaPercent(overview.QuarterlyRevenueGrowthYOY) ?? ratios.revenueGrowth;
+  ratios.pe = alphaNumber(overview.PERatio) ?? ratios.pe;
+  ratios.peg = alphaNumber(overview.PEGRatio) ?? ratios.peg;
+  ratios.pb = alphaNumber(overview.PriceToBookRatio) ?? ratios.pb;
+  profile.bonds.rating = overview.AnalystRatingStrongBuy ? "Equity analyst ratings available through Alpha Vantage overview" : profile.bonds.rating;
 }
 
 function returns(series) {
@@ -395,6 +512,8 @@ function setText(id, value) {
 function render() {
   setText("company-name", `${state.profile.company} (${state.ticker})`);
   setText("company-description", state.profile.description);
+  setText("company-overview", threeSentenceOverview(state.profile.description));
+  setText("competitors", `Top competitors: ${state.profile.competitors.join(", ")}.`);
   setText("score", state.score);
   setText("rating", state.rating);
   setText("metric-return", pct(state.stockReturn));
@@ -408,6 +527,7 @@ function render() {
   renderReport();
   setReportActions(true);
   loadReportHistory();
+  loadFinancialNews(state.ticker, state.profile.company);
 }
 
 function setReportActions(enabled) {
@@ -417,6 +537,14 @@ function setReportActions(enabled) {
 
 function hasDesktopHistory() {
   return Boolean(window.hawkReports);
+}
+
+function threeSentenceOverview(description) {
+  const sentences = String(description)
+    .replace(/\s+/g, " ")
+    .match(/[^.!?]+[.!?]+/g);
+  if (!sentences || sentences.length < 3) return description;
+  return sentences.slice(0, 3).join(" ").trim();
 }
 
 function renderCards() {
@@ -457,13 +585,13 @@ function setupCanvas(canvas) {
   canvas.width = rect.width * ratio;
   canvas.height = Number(canvas.getAttribute("height")) * ratio;
   const ctx = canvas.getContext("2d");
-  ctx.scale(ratio, ratio);
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
   ctx.clearRect(0, 0, rect.width, rect.height);
   return { ctx, w: rect.width, h: Number(canvas.getAttribute("height")) };
 }
 
 function grid(ctx, w, h) {
-  ctx.strokeStyle = "#e8edf3";
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--chart-grid").trim() || "#e8edf3";
   ctx.lineWidth = 1;
   for (let i = 1; i < 5; i += 1) {
     const y = 20 + ((h - 48) * i) / 5;
@@ -521,7 +649,7 @@ function labelChart(canvasId, labels) {
   labels.forEach((label, i) => {
     ctx.fillStyle = colors[i];
     ctx.fillRect(54 + i * 82, 16, 10, 10);
-    ctx.fillStyle = "#334155";
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--chart-text").trim() || "#334155";
     ctx.font = "12px system-ui";
     ctx.fillText(label, 70 + i * 82, 25);
   });
@@ -538,7 +666,7 @@ function drawBars(canvasId, rows, suffix) {
     const barW = Math.max(2, (Math.abs(value) / max) * (w - 142));
     ctx.fillStyle = color;
     ctx.fillRect(86, y, barW, barH);
-    ctx.fillStyle = "#334155";
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--chart-text").trim() || "#334155";
     ctx.font = "13px system-ui";
     ctx.fillText(label, 18, y + barH / 2 + 4);
     ctx.font = "700 13px system-ui";
@@ -564,7 +692,7 @@ function drawScatter() {
     ctx.arc(x, y, 3.4, 0, Math.PI * 2);
     ctx.fill();
   });
-  ctx.fillStyle = "#334155";
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--chart-text").trim() || "#334155";
   ctx.font = "700 13px system-ui";
   ctx.fillText(`Beta ${state.beta.toFixed(2)} | Corr ${state.corr.toFixed(2)} | Adj R2 ${state.adjR2.toFixed(2)}`, 52, 28);
 }
@@ -577,18 +705,25 @@ function renderReport() {
     <p><strong>Recommendation:</strong> ${state.rating} | <strong>Score:</strong> ${state.score}/100 | <strong>Most recent price:</strong> ${money(state.currentPrice)}</p>
     <h2>1. Company Introduction</h2>
     <p>${p.description}</p>
+    <p><strong>Top competitors:</strong> ${p.competitors.join(", ")}.</p>
     <p><strong>Revenue breakdown:</strong> ${p.revenue.map(([name, value]) => `${name} ${pct(value)}`).join("; ")}.</p>
     <h2>2. Data Analysis Results</h2>
     <h3>2.1 Quantitative Analysis</h3>
-    <p>Over the observed period, ${state.ticker} returned ${pct(state.stockReturn)} compared with ${pct(state.marketReturn)} for the market proxy. This indicates that the stock ${state.stockReturn > state.marketReturn ? "outperformed" : "underperformed"} the broad market.</p>
+    <h4>5-Year Returns on SPY and ${state.ticker}</h4>
+    <p>Over the observed period, ${state.ticker} returned ${pct(state.stockReturn)} compared with ${pct(state.marketReturn)} for the market proxy. This indicates that the stock ${state.stockReturn > state.marketReturn ? "outperformed" : "underperformed"} the broad market and helps frame whether company-specific exposure added value beyond a diversified index.</p>
+    <h4>Volatility and Standard Deviation</h4>
     <p>The stock's monthly standard deviation was ${pct(state.volatility)}, while the market proxy's was ${pct(state.marketVol)}. The correlation between stock and market excess returns was ${state.corr.toFixed(2)}, and CAPM beta was ${state.beta.toFixed(2)}. Adjusted R-squared was ${pct(state.adjR2 * 100)}, meaning the remaining variation is company-specific or unexplained by the market model.</p>
+    <h4>Covariance, CAPM, and Market Efficiency</h4>
     <p>The AR(1) coefficient was ${state.ar1.toFixed(2)}. ${state.weakForm ? "This supports weak-form efficiency because past monthly returns do not appear strongly useful for predicting current returns." : "This suggests the stock deserves additional efficiency testing because past returns show some persistence."}</p>
     <h3>2.2 Fundamental Analysis</h3>
+    <h4>Ratio Analysis</h4>
     <p>The company has a current ratio of ${r.currentRatio.toFixed(2)}, debt-to-equity of ${r.debtEquity.toFixed(2)}, and long-term debt-to-equity of ${r.ltDebtEquity.toFixed(2)}. These values summarize liquidity and leverage risk.</p>
     <p>Profitability is represented by a net margin of ${pct(r.netMargin)}, ROA of ${pct(r.roa)}, and ROE of ${pct(r.roe)}. Growth is represented by EPS growth of ${pct(r.epsGrowth)} and revenue growth of ${pct(r.revenueGrowth)}.</p>
     <p>Valuation uses a P/E ratio of ${r.pe.toFixed(2)}, PEG ratio of ${r.peg.toFixed(2)}, and P/B ratio of ${r.pb.toFixed(2)}. The PEG ratio is especially useful for beginners because it connects price to growth.</p>
+    <h4>Bond Analysis and Yield Spread</h4>
     <p><strong>Bond analysis:</strong> ${p.bonds.rating}. ${p.bonds.callable}. Yield spreads in this analysis range from ${Math.min(...p.bonds.spreads.map((x) => x[1])).toFixed(0)} to ${Math.max(...p.bonds.spreads.map((x) => x[1])).toFixed(0)} basis points, which indicates the market's perceived credit risk above Treasury bonds.</p>
     <h3>2.3 Technical Analysis</h3>
+    <h4>Trend, Momentum, Support, and Resistance</h4>
     <p>The latest price is ${money(state.currentPrice)}. The 10-period SMA is ${money(state.sma10.at(-1))}, and the 50-period SMA is ${money(state.sma50.at(-1))}. RSI is ${state.rsi.toFixed(1)}, which is ${state.rsi > 70 ? "overbought" : state.rsi < 30 ? "oversold" : "neutral"}.</p>
     <p>Recent support is near ${money(state.support)}, while recent resistance is near ${money(state.resistance)}. Beginners can use these levels to understand where buying or selling pressure has recently appeared.</p>
     <h2>3. Conclusion</h2>
@@ -668,7 +803,7 @@ async function loadReportHistory() {
 
 function reportBlocks() {
   const blocks = [];
-  el("report-preview").querySelectorAll("h1,h2,h3,p").forEach((node) => {
+  el("report-preview").querySelectorAll("h1,h2,h3,h4,p").forEach((node) => {
     blocks.push({ tag: node.tagName.toLowerCase(), text: node.textContent.trim() });
   });
   return blocks;
@@ -683,7 +818,7 @@ function xmlEscape(text) {
 }
 
 function paragraphXml(block) {
-  const style = block.tag === "h1" ? "Title" : block.tag === "h2" ? "Heading1" : block.tag === "h3" ? "Heading2" : "Normal";
+  const style = block.tag === "h1" ? "Title" : block.tag === "h2" ? "Heading1" : block.tag === "h3" ? "Heading2" : block.tag === "h4" ? "Heading3" : "Normal";
   return `<w:p><w:pPr><w:pStyle w:val="${style}"/></w:pPr><w:r><w:t xml:space="preserve">${xmlEscape(block.text)}</w:t></w:r></w:p>`;
 }
 
@@ -708,7 +843,8 @@ function stylesXml() {
 <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="22"/></w:rPr><w:pPr><w:spacing w:after="160" w:line="276" w:lineRule="auto"/></w:pPr></w:style>
 <w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="44"/><w:color w:val="17202A"/></w:rPr><w:pPr><w:spacing w:after="240"/></w:pPr></w:style>
 <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="30"/><w:color w:val="0D6EFD"/></w:rPr><w:pPr><w:spacing w:before="260" w:after="120"/></w:pPr></w:style>
-<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="25"/><w:color w:val="13866F"/></w:rPr><w:pPr><w:spacing w:before="180" w:after="100"/></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="25"/><w:color w:val="F97316"/></w:rPr><w:pPr><w:spacing w:before="180" w:after="100"/></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="22"/><w:color w:val="EA580C"/></w:rPr><w:pPr><w:spacing w:before="120" w:after="80"/></w:pPr></w:style>
 </w:styles>`;
 }
 
@@ -772,12 +908,57 @@ function showTopic(topic) {
   el("info-modal").showModal();
 }
 
+
+
+function getSession() {
+  try {
+    return JSON.parse(sessionStorage.getItem(AUTH_KEY));
+  } catch {
+    return null;
+  }
+}
+
+function applyAuthState() {
+  const session = getSession();
+  const authenticated = Boolean(session?.username);
+  document.body.classList.toggle("auth-locked", !authenticated);
+  el("app-shell").setAttribute("aria-hidden", String(!authenticated));
+  el("login-screen").setAttribute("aria-hidden", String(authenticated));
+  setText("session-role", authenticated ? session.username : "--");
+}
+
+function handleLogin(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const role = new FormData(form).get("role");
+  const username = String(new FormData(form).get("username") || "").trim();
+  const password = String(new FormData(form).get("password") || "").trim();
+
+  if (!username || !password) {
+    setText("login-error", "Please enter both a username and a password.");
+    return;
+  }
+
+  sessionStorage.setItem(AUTH_KEY, JSON.stringify({ role, username, signedInAt: new Date().toISOString() }));
+  form.reset();
+  setText("login-error", "");
+  applyAuthState();
+}
+
+function handleLogout() {
+  sessionStorage.removeItem(AUTH_KEY);
+  applyAuthState();
+  el("login-password").focus();
+}
+
 async function runAnalysis(ticker) {
   const normalized = String(ticker || "").trim().toUpperCase();
   if (!normalized) {
     setText("data-source", "Please enter a ticker symbol before analyzing.");
     return;
   }
+  state = null;
+  resetVisuals();
   setText("data-source", "Loading analysis...");
   setReportActions(false);
   const data = await loadTickerData(normalized);
@@ -785,23 +966,143 @@ async function runAnalysis(ticker) {
   render();
 }
 
+function resetVisuals() {
+  ["price-chart", "return-chart", "scatter-chart", "valuation-chart", "spread-chart"].forEach((id) => {
+    const canvas = el(id);
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    canvas.width = canvas.clientWidth;
+    canvas.height = Number(canvas.getAttribute("height"));
+  });
+  ["quant-copy", "ratio-grid", "technical-grid"].forEach((id) => { if (el(id)) el(id).innerHTML = ""; });
+  el("report-preview").innerHTML = '<p class="muted">Loading a fresh report for the new ticker...</p>';
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem("hawk-theme", theme);
+  const dark = theme === "dark";
+  const button = el("theme-toggle");
+  button.setAttribute("aria-checked", String(dark));
+  button.querySelector(".switch-icon").textContent = dark ? "☾" : "☀";
+  if (state) drawAllCharts();
+}
+
+
+function loadApiSettings() {
+  el("alpha-vantage-key").value = localStorage.getItem(ALPHA_VANTAGE_KEY) || "";
+  el("newsdata-key").value = localStorage.getItem(NEWSDATA_KEY) || "";
+  el("unsplash-key").value = localStorage.getItem(UNSPLASH_KEY) || "";
+}
+
+function saveApiSettings() {
+  localStorage.setItem(ALPHA_VANTAGE_KEY, el("alpha-vantage-key").value.trim());
+  localStorage.setItem(NEWSDATA_KEY, el("newsdata-key").value.trim());
+  localStorage.setItem(UNSPLASH_KEY, el("unsplash-key").value.trim());
+  setText("api-status", "API keys saved locally. Run a ticker analysis to use Alpha Vantage and refresh news.");
+  if (state) {
+    runAnalysis(state.ticker);
+  }
+}
+
+async function loadFinancialNews(ticker, companyName) {
+  const newsKey = localStorage.getItem(NEWSDATA_KEY);
+  const carousel = el("news-carousel");
+  if (!carousel) return;
+  if (!newsKey) {
+    renderNewsSlides([{ title: "Add a NewsData.io key to load recent financial headlines.", description: "The news report section will slide through headlines for the analyzed stock.", link: "", image: "" }]);
+    return;
+  }
+
+  try {
+    const query = `${ticker} stock`;
+    const url = `https://newsdata.io/api/1/latest?apikey=${encodeURIComponent(newsKey)}&q=${encodeURIComponent(query)}&language=en&category=business`;
+    const data = await fetchJsonWithTimeout(url, 9000);
+    const articles = (data.results || []).slice(0, 6);
+    const slides = await Promise.all(articles.map(async (article) => ({
+      title: article.title || `${companyName} market news`,
+      description: article.description || article.source_name || "Recent business headline.",
+      link: article.link || "",
+      image: article.image_url || await fetchUnsplashImage(`${companyName} stock market`)
+    })));
+    renderNewsSlides(slides.length ? slides : [{ title: "No recent headlines returned.", description: "Try another ticker or check your NewsData.io plan.", link: "", image: "" }]);
+  } catch (error) {
+    renderNewsSlides([{ title: "Could not load financial news.", description: error.message, link: "", image: "" }]);
+  }
+}
+
+async function fetchUnsplashImage(query) {
+  const key = localStorage.getItem(UNSPLASH_KEY);
+  if (!key) return "";
+  try {
+    const url = `https://api.unsplash.com/search/photos?query=${encodeURIComponent(query)}&per_page=1&orientation=landscape&client_id=${encodeURIComponent(key)}`;
+    const data = await fetchJsonWithTimeout(url, 7000);
+    return data.results?.[0]?.urls?.small || "";
+  } catch {
+    return "";
+  }
+}
+
+function renderNewsSlides(slides) {
+  const carousel = el("news-carousel");
+  if (newsTimer) clearInterval(newsTimer);
+  carousel.innerHTML = slides.map((slide, index) => {
+    const image = slide.image ? `style="background-image: url('${slide.image.replace(/'/g, "%27")}')"` : "";
+    const body = `<div class="news-image ${slide.image ? "" : "placeholder"}" ${image}></div><strong>${xmlEscape(slide.title)}</strong><span>${xmlEscape(String(slide.description || "").slice(0, 140))}</span>`;
+    return `<article class="news-slide ${index === 0 ? "active" : ""}">${slide.link ? `<a href="${slide.link}" target="_blank" rel="noreferrer">${body}</a>` : body}</article>`;
+  }).join("");
+  let active = 0;
+  newsTimer = setInterval(() => {
+    const items = [...carousel.querySelectorAll(".news-slide")];
+    if (items.length < 2) return;
+    items[active].classList.remove("active");
+    active = (active + 1) % items.length;
+    items[active].classList.add("active");
+  }, 5500);
+}
+
+document.getElementById("login-form").addEventListener("submit", handleLogin);
+document.getElementById("logout-button").addEventListener("click", handleLogout);
+
 document.getElementById("stock-form").addEventListener("submit", (event) => {
   event.preventDefault();
   runAnalysis(new FormData(event.currentTarget).get("ticker"));
 });
 
-document.addEventListener("click", (event) => {
+document.addEventListener("click", async (event) => {
   const topicButton = event.target.closest("[data-topic]");
   if (topicButton) showTopic(topicButton.dataset.topic);
+
+  const openReport = event.target.closest("[data-open-report]");
+  if (openReport && window.hawkReports) {
+    const result = await window.hawkReports.open(openReport.dataset.openReport);
+    if (!result.ok) setText("history-status", result.error || "Could not open report.");
+  }
+
+  const revealReport = event.target.closest("[data-reveal-report]");
+  if (revealReport && window.hawkReports) {
+    const result = await window.hawkReports.reveal(revealReport.dataset.revealReport);
+    if (!result.ok) setText("history-status", result.error || "Could not show report file.");
+  }
 });
 
 document.querySelector(".close-modal").addEventListener("click", () => el("info-modal").close());
 document.getElementById("download-report").addEventListener("click", downloadReport);
+document.getElementById("save-api-keys").addEventListener("click", saveApiSettings);
+document.getElementById("refresh-history").addEventListener("click", loadReportHistory);
+document.getElementById("refresh-news").addEventListener("click", () => state && loadFinancialNews(state.ticker, state.profile.company));
+document.getElementById("theme-toggle").addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
 document.getElementById("print-report").addEventListener("click", () => {
   if (state) window.print();
 });
 window.addEventListener("resize", () => state && drawAllCharts());
 
+loadApiSettings();
+applyTheme(localStorage.getItem("hawk-theme") || "light");
+applyAuthState();
+loadReportHistory();
 setReportActions(false);
 
 const initialTicker = new URLSearchParams(window.location.search).get("ticker");
