@@ -48,6 +48,40 @@ function assertDatabase() {
   return null;
 }
 
+function registerApiHandlers() {
+  const allowedHosts = new Set([
+    "query1.finance.yahoo.com",
+    "query2.finance.yahoo.com",
+    "www.alphavantage.co",
+    "newsdata.io",
+    "api.unsplash.com",
+    "api.openai.com"
+  ]);
+
+  ipcMain.handle("api:fetchJson", async (_event, request) => {
+    try {
+      const url = new URL(request.url);
+      if (!allowedHosts.has(url.hostname)) return { ok: false, error: `Blocked external host: ${url.hostname}` };
+      const response = await fetch(url, {
+        method: request.method || "GET",
+        headers: request.headers || {},
+        body: request.body || undefined
+      });
+      const text = await response.text();
+      let data = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = { text };
+      }
+      if (!response.ok) return { ok: false, status: response.status, error: data?.error?.message || text || response.statusText };
+      return { ok: true, data };
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  });
+}
+
 function registerReportHandlers() {
   ipcMain.handle("reports:list", () => {
     const unavailable = assertDatabase();
@@ -113,6 +147,7 @@ function createWindow() {
 
 app.whenReady().then(() => {
   initDatabase();
+  registerApiHandlers();
   registerReportHandlers();
   createWindow();
   app.on("activate", () => {

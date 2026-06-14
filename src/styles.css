@@ -106,15 +106,32 @@ nav {
   gap: 6px;
 }
 
-nav a {
+nav a,
+.nav-button {
+  display: block;
+  width: 100%;
   color: #e9eef5;
+  text-align: left;
   text-decoration: none;
   padding: 11px 12px;
   border-radius: 8px;
+  background: transparent;
+}
+
+.settings-entry {
+  margin-bottom: 10px;
+  border: 1px solid rgba(249, 115, 22, 0.6);
+  background: rgba(249, 115, 22, 0.16);
+  color: #fff;
+  font-weight: 900;
+  text-align: center;
+  letter-spacing: 0.02em;
 }
 
 nav a:hover,
-nav a:focus {
+nav a:focus,
+.nav-button:hover,
+.nav-button:focus {
   background: rgba(255, 255, 255, 0.1);
   outline: none;
 }
@@ -275,12 +292,12 @@ button.secondary {
   padding: 0;
   border: 1px solid rgba(255, 255, 255, 0.22);
   border-radius: 999px;
-  background: #facc15;
+  background: #F69521;
 }
 
 .theme-switch .switch-icon {
   position: absolute;
-  top: 3px;
+  top: calc(50% - 11px);
   left: 4px;
   display: grid;
   place-items: center;
@@ -290,6 +307,7 @@ button.secondary {
   background: #fff;
   color: #111827;
   font-size: 13px;
+  line-height: 1;
   transition: transform 160ms ease;
 }
 
@@ -453,10 +471,14 @@ button.secondary {
 canvas {
   display: block;
   width: 100%;
-  max-height: 280px;
+  height: 260px;
   background: #fbfcfd;
   border: 1px solid #edf0f4;
   border-radius: 8px;
+}
+
+#price-chart {
+  height: 320px;
 }
 
 .label-chip {
@@ -711,6 +733,16 @@ dialog::backdrop {
     grid-template-columns: 1fr;
     grid-column: auto;
   }
+
+  .settings-row,
+  .settings-field,
+  .settings-modal .api-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-check {
+    align-items: start;
+  }
 }
 
 @media print {
@@ -855,4 +887,113 @@ body.auth-locked .app-shell {
 
 .session-card button {
   width: 100%;
+}
+
+.settings-modal {
+  width: min(900px, calc(100vw - 32px));
+  max-height: min(820px, calc(100vh - 32px));
+  overflow: auto;
+  padding: 26px;
+}
+
+.settings-modal h2 {
+  margin-bottom: 18px;
+}
+
+.settings-section {
+  display: grid;
+  gap: 14px;
+  padding: 20px 0;
+  border-top: 1px solid var(--line);
+}
+
+.settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 24px;
+}
+
+.settings-row span {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.settings-check {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.settings-check input {
+  width: auto;
+}
+
+.settings-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-height: 36px;
+}
+
+.ticker-pill {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 10px;
+  background: var(--panel);
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.source-note {
+  margin-top: 10px;
+}
+
+
+.settings-field {
+  display: grid;
+  grid-template-columns: auto 86px auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.settings-field input {
+  width: 86px;
+}
+
+.settings-modal .api-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.settings-modal .api-grid label {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-modal #save-api-keys {
+  justify-self: start;
+}
+
+.settings-modal .history-list {
+  max-height: 260px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.settings-modal .history-item {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.settings-modal .history-item .action-row {
+  justify-content: flex-start;
 }

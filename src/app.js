@@ -41,8 +41,14 @@ const AUTH_KEY = "hawk_auth_session";
 const ALPHA_VANTAGE_KEY = "hawk_alpha_vantage_key";
 const NEWSDATA_KEY = "hawk_newsdata_key";
 const UNSPLASH_KEY = "hawk_unsplash_key";
+const OPENAI_KEY = "hawk_openai_key";
+const OPENAI_MODEL = "hawk_openai_model";
+const SHOW_TICKER_HISTORY = "hawk_show_ticker_history";
+const RECENT_TICKERS = "hawk_recent_tickers";
+const NEWS_REFRESH_MINUTES = "hawk_news_refresh_minutes";
 
 let newsTimer = null;
+let newsRefreshTimer = null;
 
 const PROFILES = {
   GOOGL: {
@@ -256,41 +262,36 @@ async function loadTickerData(ticker) {
   const generated = createSeries(profile, ticker);
   const alphaKey = localStorage.getItem(ALPHA_VANTAGE_KEY);
 
-  if (!alphaKey) {
-    return {
-      profile,
-      prices: generated,
-      source: "Add an Alpha Vantage API key to use real stock data. Showing generated educational data for now."
-    };
-  }
-
   try {
-    const [stockMonthly, marketMonthly, quote, overview] = await Promise.all([
-      fetchAlphaMonthlySeries(ticker, alphaKey),
-      fetchAlphaMonthlySeries("SPY", alphaKey),
-      fetchAlphaGlobalQuote(ticker, alphaKey),
-      fetchAlphaOverview(ticker, alphaKey)
+    const [stockChart, marketChart, overview] = await Promise.all([
+      fetchYahooChart(ticker),
+      fetchYahooChart("SPY"),
+      alphaKey ? fetchAlphaOverview(ticker, alphaKey).catch(() => null) : Promise.resolve(null)
     ]);
-    applyAlphaOverview(profile, overview, ticker);
-    const stock = mergeLatestQuote(stockMonthly, quote);
-    const market = marketMonthly.slice(-stock.length);
+    if (overview) applyAlphaOverview(profile, overview, ticker);
+    const stock = stockChart.prices;
+    const market = marketChart.prices.slice(-stock.length);
     if (stock.length > 24 && market.length > 24) {
+      profile.basePrice = stock[0];
+      profile.targetPrice = stock.at(-1);
       return {
         profile,
-        prices: { stock, market },
-        source: `Alpha Vantage monthly time series and latest quote for ${ticker}. Latest quote: ${quote ? money(quote) : "not available"}.`
+        prices: { stock, market, labels: stockChart.labels },
+        yahoo: stockChart,
+        source: `Yahoo Finance chart data for ${ticker}. Latest Yahoo Finance close/quote: ${money(stock.at(-1))}. ${overview ? "Alpha Vantage overview data was used for fundamentals." : "Add an Alpha Vantage key for richer fundamentals."}`
       };
     }
   } catch (error) {
-    console.info("Alpha Vantage data unavailable; using generated data.", error);
+    console.info("Yahoo Finance data unavailable; using generated data.", error);
     return {
       profile,
       prices: generated,
-      source: `Alpha Vantage data could not be loaded (${error.message}). Showing generated educational data.`
+      yahoo: null,
+      source: `Yahoo Finance data could not be loaded (${error.message}). Showing generated educational data.`
     };
   }
 
-  return { profile, prices: generated, source: "Alpha Vantage returned too little price history. Showing generated educational data." };
+  return { profile, prices: generated, yahoo: null, source: "Yahoo Finance returned too little price history. Showing generated educational data." };
 }
 
 async function enrichProfileFromDirectory(profile, ticker) {
@@ -317,12 +318,26 @@ async function findCompanyDirectoryEntry(ticker) {
   }
 }
 
-async function fetchJsonWithTimeout(url, timeoutMs = 8000) {
+async function fetchJsonWithTimeout(url, timeoutMs = 8000, options = {}) {
+  if (window.hawkApi) {
+    const result = await window.hawkApi.fetchJson({
+      url,
+      method: options.method || "GET",
+      headers: options.headers || {},
+      body: options.body || null
+    });
+    if (!result.ok) throw new Error(result.error || `Request failed with status ${result.status}`);
+    const data = result.data;
+    if (data?.Note || data?.Information) throw new Error(data.Note || data.Information);
+    if (data?.["Error Message"]) throw new Error(data["Error Message"]);
+    return data;
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   try {
-    response = await fetch(url, { signal: controller.signal });
+    response = await fetch(url, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(timeout);
   }
@@ -331,6 +346,27 @@ async function fetchJsonWithTimeout(url, timeoutMs = 8000) {
   if (data.Note || data.Information) throw new Error(data.Note || data.Information);
   if (data["Error Message"]) throw new Error(data["Error Message"]);
   return data;
+}
+
+
+async function fetchYahooChart(ticker) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?range=5y&interval=1mo&events=div%2Csplits`;
+  const data = await fetchJsonWithTimeout(url, 9000);
+  const result = data.chart?.result?.[0];
+  if (!result) throw new Error(data.chart?.error?.description || "Yahoo Finance chart data was not returned.");
+  const timestamps = result.timestamp || [];
+  const close = result.indicators?.quote?.[0]?.close || [];
+  const prices = close.map(Number).filter((value) => Number.isFinite(value));
+  const labels = timestamps.slice(-prices.length).map((stamp) => new Date(stamp * 1000).toLocaleDateString(undefined, { month: "short", year: "2-digit" }));
+  const quote = Number(result.meta?.regularMarketPrice);
+  if (Number.isFinite(quote) && prices.length) prices[prices.length - 1] = quote;
+  return {
+    prices: prices.slice(-61),
+    labels: labels.slice(-61),
+    quote: Number.isFinite(quote) ? quote : prices.at(-1),
+    currency: result.meta?.currency || "USD",
+    yahooUrl: `https://finance.yahoo.com/quote/${encodeURIComponent(ticker)}/chart/`
+  };
 }
 
 async function fetchAlphaMonthlySeries(ticker, apiKey) {
@@ -481,6 +517,7 @@ function analyze(profile, prices, ticker, source) {
     source,
     profile,
     prices,
+    yahoo: null,
     stockReturns,
     marketReturns,
     excessStock,
@@ -528,6 +565,8 @@ function render() {
   setReportActions(true);
   loadReportHistory();
   loadFinancialNews(state.ticker, state.profile.company);
+  scheduleNewsRefresh();
+  generateAiContent();
 }
 
 function setReportActions(enabled) {
@@ -582,12 +621,13 @@ function copyCard([label, value, body], className = "technical-card") {
 function setupCanvas(canvas) {
   const ratio = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
+  const cssHeight = rect.height || Number(canvas.getAttribute("height"));
   canvas.width = rect.width * ratio;
-  canvas.height = Number(canvas.getAttribute("height")) * ratio;
+  canvas.height = cssHeight * ratio;
   const ctx = canvas.getContext("2d");
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-  ctx.clearRect(0, 0, rect.width, rect.height);
-  return { ctx, w: rect.width, h: Number(canvas.getAttribute("height")) };
+  ctx.clearRect(0, 0, rect.width, cssHeight);
+  return { ctx, w: rect.width, h: cssHeight };
 }
 
 function grid(ctx, w, h) {
@@ -622,13 +662,10 @@ function drawLine(canvasId, series, color, min, max, width = 2) {
 }
 
 function drawAllCharts() {
-  const normalizedStock = state.prices.stock.map((v) => (v / state.prices.stock[0]) * 100);
-  const normalizedMarket = state.prices.market.map((v) => (v / state.prices.market[0]) * 100);
-  const normalizedSma10 = state.sma10.map((v) => (v ? (v / state.prices.stock[0]) * 100 : null));
-  const normalizedSma50 = state.sma50.map((v) => (v ? (v / state.prices.stock[0]) * 100 : null));
-  const lineValues = [...normalizedStock, ...normalizedMarket, ...normalizedSma10.filter(Boolean), ...normalizedSma50.filter(Boolean)];
-  drawLine("price-chart", [normalizedStock, normalizedMarket, normalizedSma10, normalizedSma50], ["#0d6efd", "#13866f", "#a05a00", "#6f42c1"], Math.min(...lineValues), Math.max(...lineValues));
-  labelChart("price-chart", [`${state.ticker}`, "SPY", "SMA 10", "SMA 50"]);
+  const priceValues = [...state.prices.stock, ...state.sma10.filter(Boolean), ...state.sma50.filter(Boolean)];
+  drawLine("price-chart", [state.prices.stock, state.sma10, state.sma50], ["#0d6efd", "#a05a00", "#6f42c1"], Math.min(...priceValues), Math.max(...priceValues));
+  labelChart("price-chart", [`${state.ticker} close`, "SMA 10", "SMA 50"]);
+  labelPriceAxis("price-chart", Math.min(...priceValues), Math.max(...priceValues), state.prices.stock.at(-1));
   drawBars("return-chart", [
     [state.ticker, state.stockReturn, "#0d6efd"],
     ["SPY", state.marketReturn, "#13866f"]
@@ -640,6 +677,16 @@ function drawAllCharts() {
     ["P/B", state.profile.ratios.pb, "#a05a00"]
   ], "");
   drawBars("spread-chart", state.profile.bonds.spreads.map(([label, value]) => [label, value, "#6f42c1"]), " bps");
+}
+
+function labelPriceAxis(canvasId, min, max, latest) {
+  const canvas = el(canvasId);
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--chart-text").trim() || "#334155";
+  ctx.font = "700 12px system-ui";
+  ctx.fillText(`High ${money(max)}`, 52, 48);
+  ctx.fillText(`Low ${money(min)}`, 52, Number(canvas.getAttribute("height")) - 18);
+  ctx.fillText(`Latest ${money(latest)}`, Math.max(52, canvas.getBoundingClientRect().width - 150), 48);
 }
 
 function labelChart(canvasId, labels) {
@@ -707,6 +754,7 @@ function renderReport() {
     <p>${p.description}</p>
     <p><strong>Top competitors:</strong> ${p.competitors.join(", ")}.</p>
     <p><strong>Revenue breakdown:</strong> ${p.revenue.map(([name, value]) => `${name} ${pct(value)}`).join("; ")}.</p>
+    <p><strong>Yahoo Finance chart:</strong> ${state.yahoo?.yahooUrl || `https://finance.yahoo.com/quote/${state.ticker}/chart/`}</p>
     <h2>2. Data Analysis Results</h2>
     <h3>2.1 Quantitative Analysis</h3>
     <h4>5-Year Returns on SPY and ${state.ticker}</h4>
@@ -769,24 +817,27 @@ function downloadDocxBytes(bytes, fileName) {
 }
 
 async function loadReportHistory() {
-  const list = el("history-list");
-  if (!list) return;
+  const list = el("history-list") || el("settings-history-list");
+  const settingsList = el("settings-history-list");
+  if (!list && !settingsList) return;
 
   if (!hasDesktopHistory()) {
     setText("history-status", "SQLite history is active in the Electron desktop app. Browser preview mode can download DOCX reports but cannot write to SQLite.");
-    list.innerHTML = "";
+    if (list) list.innerHTML = "";
+    if (settingsList && settingsList !== list) settingsList.innerHTML = "";
     return;
   }
 
   const result = await window.hawkReports.list();
   if (!result.ok) {
     setText("history-status", result.error || "Could not load report history.");
-    list.innerHTML = "";
+    if (list) list.innerHTML = "";
+    if (settingsList && settingsList !== list) settingsList.innerHTML = "";
     return;
   }
 
   setText("history-status", result.reports.length ? "Saved DOCX reports are listed below. Open uses your system default editor for .docx files." : "No saved reports yet.");
-  list.innerHTML = result.reports.map((report) => `
+  const historyHtml = result.reports.map((report) => `
     <article class="history-item">
       <div>
         <strong>${report.company} (${report.ticker})</strong>
@@ -799,6 +850,86 @@ async function loadReportHistory() {
       </div>
     </article>
   `).join("");
+  if (list) list.innerHTML = historyHtml;
+  if (settingsList && settingsList !== list) settingsList.innerHTML = historyHtml;
+}
+
+
+
+function reportDataForPrompt() {
+  return {
+    ticker: state.ticker,
+    company: state.profile.company,
+    description: state.profile.description,
+    competitors: state.profile.competitors,
+    currentPrice: state.currentPrice,
+    stockReturn: state.stockReturn,
+    marketReturn: state.marketReturn,
+    volatility: state.volatility,
+    marketVolatility: state.marketVol,
+    beta: state.beta,
+    correlation: state.corr,
+    adjustedR2: state.adjR2,
+    rsi: state.rsi,
+    support: state.support,
+    resistance: state.resistance,
+    rating: state.rating,
+    score: state.score,
+    ratios: state.profile.ratios,
+    yahooFinanceChart: state.yahoo?.yahooUrl || `https://finance.yahoo.com/quote/${state.ticker}/chart/`
+  };
+}
+
+async function generateAiContent() {
+  const key = localStorage.getItem(OPENAI_KEY);
+  if (!key || !state) return;
+  const model = localStorage.getItem(OPENAI_MODEL) || "gpt-4.1-mini";
+  const snapshot = JSON.stringify(reportDataForPrompt(), null, 2);
+  try {
+    setText("company-overview", "AI is writing a 3 sentence overview...");
+    const overview = await callOpenAI(model, key, `Write exactly 3 beginner-friendly sentences overviewing this stock for a student investment report. Use only the supplied data and avoid investment advice language.\n\nDATA:\n${snapshot}`);
+    if (overview) setText("company-overview", overview.replace(/\s+/g, " ").trim());
+
+    el("report-preview").innerHTML = '<p class="muted">AI is writing the detailed Hawk Report...</p>';
+    const report = await callOpenAI(model, key, `Write a detailed Hawk Report as safe HTML using only h1, h2, h3, h4, and p tags. Base the structure on this template: 1 Company Introduction; revenue breakdown; 2 Data Analysis Results; 2.1 Quantitative Analysis covering 5-year returns, volatility/standard deviation, covariance/correlation, CAPM beta, weak-form market efficiency; 2.2 Fundamental Analysis covering ratio analysis, valuation, bond/yield spread; 2.3 Technical Analysis covering SMA, RSI, support, resistance; 3 Conclusion. Mention the Yahoo Finance chart link as the source for market chart imagery. Make it beginner-friendly but detailed, similar to a student Hawk Report.\n\nDATA:\n${snapshot}`);
+    if (report) el("report-preview").innerHTML = sanitizeReportHtml(report);
+  } catch (error) {
+    console.info("AI report generation unavailable.", error);
+    renderReport();
+    setText("api-status", `AI generation failed: ${error.message}`);
+  }
+}
+
+async function callOpenAI(model, apiKey, prompt) {
+  const data = await fetchJsonWithTimeout("https://api.openai.com/v1/responses", 30000, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model,
+      input: prompt,
+      temperature: 0.3
+    })
+  });
+  return data.output_text || data.output?.flatMap((item) => item.content || []).map((part) => part.text || "").join("\n") || "";
+}
+
+function sanitizeReportHtml(html) {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const allowed = new Set(["H1", "H2", "H3", "H4", "P", "STRONG", "EM", "BR"]);
+  template.content.querySelectorAll("*").forEach((node) => {
+    if (!allowed.has(node.tagName)) {
+      const p = document.createElement("p");
+      p.textContent = node.textContent;
+      node.replaceWith(p);
+      return;
+    }
+    [...node.attributes].forEach((attr) => node.removeAttribute(attr.name));
+  });
+  return template.innerHTML;
 }
 
 function reportBlocks() {
@@ -963,6 +1094,8 @@ async function runAnalysis(ticker) {
   setReportActions(false);
   const data = await loadTickerData(normalized);
   state = analyze(data.profile, data.prices, normalized, data.source);
+  state.yahoo = data.yahoo || null;
+  recordTicker(normalized);
   render();
 }
 
@@ -991,17 +1124,71 @@ function applyTheme(theme) {
 }
 
 
+
+function getRecentTickers() {
+  try {
+    return JSON.parse(localStorage.getItem(RECENT_TICKERS)) || [];
+  } catch {
+    return [];
+  }
+}
+
+function recordTicker(ticker) {
+  const recent = [ticker, ...getRecentTickers().filter((item) => item !== ticker)].slice(0, 10);
+  localStorage.setItem(RECENT_TICKERS, JSON.stringify(recent));
+  updateTickerHistoryUI();
+}
+
+function getNewsRefreshMinutes() {
+  const value = Number(localStorage.getItem(NEWS_REFRESH_MINUTES) || "30");
+  return Number.isFinite(value) && value >= 1 ? value : 30;
+}
+
+function scheduleNewsRefresh() {
+  if (newsRefreshTimer) clearInterval(newsRefreshTimer);
+  if (!state) return;
+  const minutes = getNewsRefreshMinutes();
+  newsRefreshTimer = setInterval(() => {
+    if (state) loadFinancialNews(state.ticker, state.profile.company);
+  }, minutes * 60 * 1000);
+  setText("api-status", `News will auto-refresh every ${minutes} minute${minutes === 1 ? "" : "s"} for the current ticker.`);
+}
+
+function updateTickerHistoryUI() {
+  const enabled = localStorage.getItem(SHOW_TICKER_HISTORY) !== "false";
+  el("ticker").toggleAttribute("list", enabled);
+  if (enabled) el("ticker").setAttribute("list", "ticker-history-list");
+  const recent = getRecentTickers();
+  el("ticker-history-list").innerHTML = enabled ? recent.map((ticker) => `<option value="${ticker}"></option>`).join("") : "";
+  const settingsList = el("settings-ticker-history");
+  if (settingsList) settingsList.innerHTML = recent.length ? recent.map((ticker) => `<button type="button" class="ticker-pill" data-use-ticker="${ticker}">${ticker}</button>`).join("") : '<p class="muted">No recent tickers yet.</p>';
+  const checkbox = el("show-ticker-history");
+  if (checkbox) checkbox.checked = enabled;
+}
+
 function loadApiSettings() {
+  el("openai-key").value = localStorage.getItem(OPENAI_KEY) || "";
+  el("openai-model").value = localStorage.getItem(OPENAI_MODEL) || "gpt-4.1-mini";
   el("alpha-vantage-key").value = localStorage.getItem(ALPHA_VANTAGE_KEY) || "";
   el("newsdata-key").value = localStorage.getItem(NEWSDATA_KEY) || "";
   el("unsplash-key").value = localStorage.getItem(UNSPLASH_KEY) || "";
+  el("news-refresh-minutes").value = String(getNewsRefreshMinutes());
+  updateTickerHistoryUI();
 }
 
 function saveApiSettings() {
+  localStorage.setItem(OPENAI_KEY, el("openai-key").value.trim());
+  localStorage.setItem(OPENAI_MODEL, el("openai-model").value.trim() || "gpt-4.1-mini");
   localStorage.setItem(ALPHA_VANTAGE_KEY, el("alpha-vantage-key").value.trim());
   localStorage.setItem(NEWSDATA_KEY, el("newsdata-key").value.trim());
   localStorage.setItem(UNSPLASH_KEY, el("unsplash-key").value.trim());
-  setText("api-status", "API keys saved locally. Run a ticker analysis to use Alpha Vantage and refresh news.");
+  localStorage.setItem(SHOW_TICKER_HISTORY, String(el("show-ticker-history").checked));
+  const refreshMinutes = Math.max(1, Math.min(240, Number(el("news-refresh-minutes").value) || 30));
+  localStorage.setItem(NEWS_REFRESH_MINUTES, String(refreshMinutes));
+  el("news-refresh-minutes").value = String(refreshMinutes);
+  updateTickerHistoryUI();
+  scheduleNewsRefresh();
+  setText("api-status", `Settings saved locally. News will auto-refresh every ${refreshMinutes} minute${refreshMinutes === 1 ? "" : "s"}.`);
   if (state) {
     runAnalysis(state.ticker);
   }
@@ -1075,6 +1262,12 @@ document.addEventListener("click", async (event) => {
   const topicButton = event.target.closest("[data-topic]");
   if (topicButton) showTopic(topicButton.dataset.topic);
 
+  const useTicker = event.target.closest("[data-use-ticker]");
+  if (useTicker) {
+    el("ticker").value = useTicker.dataset.useTicker;
+    runAnalysis(useTicker.dataset.useTicker);
+  }
+
   const openReport = event.target.closest("[data-open-report]");
   if (openReport && window.hawkReports) {
     const result = await window.hawkReports.open(openReport.dataset.openReport);
@@ -1088,10 +1281,17 @@ document.addEventListener("click", async (event) => {
   }
 });
 
-document.querySelector(".close-modal").addEventListener("click", () => el("info-modal").close());
+document.getElementById("close-info-modal").addEventListener("click", () => el("info-modal").close());
 document.getElementById("download-report").addEventListener("click", downloadReport);
+document.getElementById("settings-button").addEventListener("click", () => {
+  updateTickerHistoryUI();
+  loadReportHistory();
+  el("settings-modal").showModal();
+});
+document.getElementById("close-settings").addEventListener("click", () => el("settings-modal").close());
+document.getElementById("show-ticker-history").addEventListener("change", saveApiSettings);
 document.getElementById("save-api-keys").addEventListener("click", saveApiSettings);
-document.getElementById("refresh-history").addEventListener("click", loadReportHistory);
+document.getElementById("refresh-history")?.addEventListener("click", loadReportHistory);
 document.getElementById("refresh-news").addEventListener("click", () => state && loadFinancialNews(state.ticker, state.profile.company));
 document.getElementById("theme-toggle").addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
 document.getElementById("print-report").addEventListener("click", () => {

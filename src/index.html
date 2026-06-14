@@ -39,18 +39,12 @@
           </div>
         </div>
         <nav>
-          <div class="theme-row">
-            <span>Dark Mode</span>
-            <button id="theme-toggle" class="theme-switch" type="button" role="switch" aria-checked="false" aria-label="Toggle dark mode">
-              <span class="switch-icon" aria-hidden="true">☀</span>
-            </button>
-          </div>
+          <button id="settings-button" class="nav-button settings-entry" type="button">Settings</button>
           <a href="#overview">Overview</a>
           <a href="#quant">Quantitative</a>
           <a href="#fundamental">Fundamental</a>
           <a href="#technical">Technical</a>
           <a href="#report">Report</a>
-          <a href="#history">History</a>
         </nav>
         <div class="session-card">
           <small>Logged in as</small>
@@ -75,33 +69,17 @@
       <main>
         <section class="toolbar" id="overview">
           <div>
-            <p class="eyebrow">Beginner-friendly stock analysis</p>
             <h1>Analyze a stock, understand the math, export a report.</h1>
           </div>
           <form id="stock-form" class="search-panel">
             <label for="ticker">Ticker</label>
             <div class="search-row">
-              <input id="ticker" name="ticker" placeholder="Enter ticker, e.g. TSLA" autocomplete="off" required />
+              <input id="ticker" name="ticker" list="ticker-history-list" placeholder="Enter ticker, e.g. TSLA" autocomplete="off" required />
+              <datalist id="ticker-history-list"></datalist>
               <button type="submit">Analyze</button>
             </div>
             <p id="data-source" class="muted">Enter any stock ticker symbol to generate an analysis.</p>
           </form>
-        </section>
-
-        <section class="api-settings section-band compact-band">
-          <div class="section-head">
-            <div>
-              <p class="eyebrow">API settings</p>
-              <h2>Connect real stock data and recent news.</h2>
-            </div>
-            <button id="save-api-keys" type="button" class="secondary">Save API Keys</button>
-          </div>
-          <div class="api-grid">
-            <label>Alpha Vantage API Key<input id="alpha-vantage-key" type="password" placeholder="Required for stock prices and fundamentals" /></label>
-            <label>NewsData.io API Key<input id="newsdata-key" type="password" placeholder="Required for financial news" /></label>
-            <label>Unsplash Access Key<input id="unsplash-key" type="password" placeholder="Optional image fallback" /></label>
-          </div>
-          <p id="api-status" class="muted">Keys are saved locally in this browser profile. Alpha Vantage powers the stock analysis when a key is saved.</p>
         </section>
 
         <section class="summary-grid" aria-live="polite">
@@ -229,22 +207,57 @@
           </div>
         </section>
 
-        <section id="history" class="section-band history-panel">
-          <div class="section-head">
-            <div>
-              <p class="eyebrow">5. Report history</p>
-              <h2>Open previous Hawk Reports in Microsoft Word, Google Docs, or other editor.</h2>
-            </div>
-            <button id="refresh-history" class="secondary">Refresh</button>
-          </div>
-          <p id="history-status" class="muted">Desktop history uses a local SQLite database. In the browser preview, reports can still be downloaded.</p>
-          <div id="history-list" class="history-list"></div>
-        </section>
       </main>
     </div>
 
+    <dialog id="settings-modal" class="settings-modal">
+      <button class="close-modal" id="close-settings" aria-label="Close settings">x</button>
+      <h2>Settings</h2>
+      <section class="settings-section">
+        <div class="settings-row">
+          <div>
+            <strong>Dark Mode</strong>
+            <span>Switch between light and dark display.</span>
+          </div>
+          <button id="theme-toggle" class="theme-switch" type="button" role="switch" aria-checked="false" aria-label="Toggle dark mode">
+            <span class="switch-icon" aria-hidden="true">☀</span>
+          </button>
+        </div>
+        <label class="settings-check">
+          <input id="show-ticker-history" type="checkbox" />
+          Show recent ticker history in the ticker input
+        </label>
+        <label class="settings-field">
+          Auto-refresh financial news every
+          <input id="news-refresh-minutes" type="number" min="1" max="240" step="1" />
+          minutes
+        </label>
+      </section>
+      <section class="settings-section">
+        <p class="eyebrow">API Keys</p>
+        <div class="api-grid">
+          <label>OpenAI API Key<input id="openai-key" type="password" placeholder="Required for AI overview and report writing" /></label>
+          <label>OpenAI Model<input id="openai-model" type="text" placeholder="gpt-4.1-mini" /></label>
+          <label>Alpha Vantage API Key<input id="alpha-vantage-key" type="password" placeholder="Optional fundamentals backup" /></label>
+          <label>NewsData.io API Key<input id="newsdata-key" type="password" placeholder="Required for financial news" /></label>
+          <label>Unsplash Access Key<input id="unsplash-key" type="password" placeholder="Optional news image fallback" /></label>
+        </div>
+        <button id="save-api-keys" type="button" class="secondary">Save Settings</button>
+        <p id="api-status" class="muted">Keys are saved locally in this app profile. Yahoo Finance data powers charts; OpenAI writes the overview and Hawk Report when configured. News refreshes automatically using the interval above.</p>
+      </section>
+      <section class="settings-section">
+        <p class="eyebrow">Recently analyzed tickers</p>
+        <div id="settings-ticker-history" class="settings-list"></div>
+      </section>
+      <section class="settings-section">
+        <p class="eyebrow">Recent Hawk Reports</p>
+        <p id="history-status" class="muted">Desktop history uses a local SQLite database. Browser preview mode can still download reports.</p>
+        <div id="settings-history-list" class="history-list"></div>
+      </section>
+    </dialog>
+
     <dialog id="info-modal">
-      <button class="close-modal" aria-label="Close">x</button>
+      <button class="close-modal" id="close-info-modal" aria-label="Close">x</button>
       <h3 id="modal-title"></h3>
       <p id="modal-body"></p>
     </dialog>

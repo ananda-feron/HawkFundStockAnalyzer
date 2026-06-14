@@ -6,3 +6,7 @@ contextBridge.exposeInMainWorld("hawkReports", {
   open: (reportPath) => ipcRenderer.invoke("reports:open", reportPath),
   reveal: (reportPath) => ipcRenderer.invoke("reports:reveal", reportPath)
 });
+
+contextBridge.exposeInMainWorld("hawkApi", {
+  fetchJson: (request) => ipcRenderer.invoke("api:fetchJson", request)
+});
